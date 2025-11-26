@@ -49,3 +49,4 @@ llama_cpp_build/
 
 # Binary files (will be built by CI)
 /bin/
+pubspec.lock
