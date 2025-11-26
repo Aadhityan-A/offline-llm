@@ -2,11 +2,14 @@ name: Build and Release
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
+        default: 'manual-build'
 
 env:
   FLUTTER_VERSION: '3.24.0'
