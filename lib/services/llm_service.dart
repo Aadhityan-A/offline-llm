@@ -3,21 +3,94 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as path;
 
+/// Configuration for LLM generation parameters
+class LLMConfig {
+  final int maxTokens;
+  final int contextSize;
+  final double temperature;
+  final double repeatPenalty;
+  final int repeatLastN;
+  final double topP;
+  final int topK;
+  final List<String> stopSequences;
+
+  const LLMConfig({
+    this.maxTokens = 512,
+    this.contextSize = 2048,
+    this.temperature = 0.7,
+    this.repeatPenalty = 1.1,
+    this.repeatLastN = 64,
+    this.topP = 0.9,
+    this.topK = 40,
+    this.stopSequences = const [],
+  });
+
+  LLMConfig copyWith({
+    int? maxTokens,
+    int? contextSize,
+    double? temperature,
+    double? repeatPenalty,
+    int? repeatLastN,
+    double? topP,
+    int? topK,
+    List<String>? stopSequences,
+  }) {
+    return LLMConfig(
+      maxTokens: maxTokens ?? this.maxTokens,
+      contextSize: contextSize ?? this.contextSize,
+      temperature: temperature ?? this.temperature,
+      repeatPenalty: repeatPenalty ?? this.repeatPenalty,
+      repeatLastN: repeatLastN ?? this.repeatLastN,
+      topP: topP ?? this.topP,
+      topK: topK ?? this.topK,
+      stopSequences: stopSequences ?? this.stopSequences,
+    );
+  }
+}
+
 /// A wrapper service that manages llama.cpp operations
 /// Uses Process to run llama-cli for maximum compatibility
 class LLMService {
   String? _modelPath;
   bool _isLoaded = false;
   Process? _process;
+  String? _llamaCliPath;
+  bool _isGenerating = false;
+  
+  // Default configuration
+  LLMConfig config = const LLMConfig();
   
   bool get isLoaded => _isLoaded;
   String? get modelPath => _modelPath;
+  bool get isGenerating => _isGenerating;
 
   /// Load a GGUF model file
   Future<bool> loadModel(String modelPath) async {
     try {
-      if (!await File(modelPath).exists()) {
+      // Validate model file exists
+      final file = File(modelPath);
+      if (!await file.exists()) {
         throw Exception('Model file not found: $modelPath');
+      }
+      
+      // Validate file extension
+      if (!modelPath.toLowerCase().endsWith('.gguf')) {
+        throw Exception('Invalid model format. Please use a .gguf file.');
+      }
+      
+      // Validate file size (should be at least a few MB)
+      final stat = await file.stat();
+      if (stat.size < 1024 * 1024) { // Less than 1MB
+        throw Exception('Model file appears to be corrupted or incomplete.');
+      }
+      
+      // Find llama-cli before confirming model load
+      _llamaCliPath = await _findLlamaCli();
+      if (_llamaCliPath == null) {
+        throw Exception(
+          'llama-cli not found. Please ensure llama.cpp is properly installed.\n'
+          'Expected locations: bin/llama-cli, lib/llama-cli, or system PATH.'
+        );
       }
       
       _modelPath = modelPath;
@@ -25,36 +98,42 @@ class LLMService {
       return true;
     } catch (e) {
       _isLoaded = false;
+      _modelPath = null;
+      _llamaCliPath = null;
       rethrow;
     }
   }
 
-  /// Generate a response using the loaded model
-  /// Uses llama-cli subprocess for cross-platform compatibility
-  Stream<String> generateStream(String prompt, {int maxTokens = 512}) async* {
-    if (!_isLoaded || _modelPath == null) {
-      throw Exception('Model not loaded');
-    }
-
-    // Find llama-cli executable
-    final llamaCliPath = await _findLlamaCli();
-    if (llamaCliPath == null) {
-      throw Exception('llama-cli not found. Please ensure llama.cpp is installed or bundled with the app.');
-    }
-
-    final args = [
+  /// Build command line arguments for llama-cli
+  List<String> _buildArgs(String prompt, LLMConfig cfg) {
+    final args = <String>[
       '-m', _modelPath!,
       '-p', prompt,
-      '-n', maxTokens.toString(),
+      '-n', cfg.maxTokens.toString(),
+      '-c', cfg.contextSize.toString(),
+      '--temp', cfg.temperature.toString(),
+      '--repeat-penalty', cfg.repeatPenalty.toString(),
+      '--repeat-last-n', cfg.repeatLastN.toString(),
+      '--top-p', cfg.topP.toString(),
+      '--top-k', cfg.topK.toString(),
       '--no-display-prompt',
-      '-c', '2048',
-      '--temp', '0.7',
-      '--repeat-penalty', '1.1',
     ];
+    
+    // Add stop sequences using --reverse-prompt (correct llama-cli argument)
+    for (final stop in cfg.stopSequences) {
+      if (stop.isNotEmpty) {
+        args.addAll(['-r', stop]);
+      }
+    }
+    
+    return args;
+  }
 
-    // Set LD_LIBRARY_PATH to find shared libraries
-    final execDir = path.dirname(llamaCliPath);
+  /// Set up environment variables for the process
+  Map<String, String> _buildEnvironment() {
     final env = Map<String, String>.from(Platform.environment);
+    final execDir = path.dirname(_llamaCliPath!);
+    
     if (Platform.isLinux) {
       final existingLdPath = env['LD_LIBRARY_PATH'] ?? '';
       env['LD_LIBRARY_PATH'] = '$execDir:$existingLdPath';
@@ -62,51 +141,151 @@ class LLMService {
       final existingDylibPath = env['DYLD_LIBRARY_PATH'] ?? '';
       env['DYLD_LIBRARY_PATH'] = '$execDir:$existingDylibPath';
     }
-
-    _process = await Process.start(
-      llamaCliPath, 
-      args,
-      environment: env,
-    );
     
-    // Stream stdout
-    await for (final chunk in _process!.stdout.transform(utf8.decoder)) {
-      yield chunk;
+    return env;
+  }
+
+  /// Generate a response using the loaded model (streaming)
+  Stream<String> generateStream(String prompt, {LLMConfig? overrideConfig}) async* {
+    if (!_isLoaded || _modelPath == null) {
+      throw Exception('No model loaded. Please load a model first.');
+    }
+    
+    if (_llamaCliPath == null) {
+      throw Exception('llama-cli not available.');
+    }
+    
+    if (_isGenerating) {
+      throw Exception('Generation already in progress. Please wait or stop the current generation.');
     }
 
-    // Check for errors
-    final errors = await _process!.stderr.transform(utf8.decoder).join();
-    if (errors.isNotEmpty) {
-      // Filter out llama.cpp info messages
-      final realErrors = errors.split('\n')
-          .where((line) => 
-              !line.startsWith('llama_') && 
-              !line.startsWith('llm_') &&
-              !line.startsWith('ggml_') &&
-              !line.startsWith('gguf') &&
-              !line.contains('sampling') &&
-              !line.contains('main:') &&
-              !line.contains('sampler') &&
-              !line.contains('generate:') &&
-              !line.contains('n_predict') &&
-              !line.contains('vocab') &&
-              !line.contains('model size') &&
-              !line.contains('warmup') &&
-              line.trim().isNotEmpty)
-          .join('\n');
-      if (realErrors.isNotEmpty) {
-        throw Exception(realErrors);
+    _isGenerating = true;
+    
+    try {
+      final cfg = overrideConfig ?? config.copyWith(
+        // Default stop sequences for chat format
+        stopSequences: ['User:', '\nUser:', 'Human:', '\nHuman:'],
+      );
+      
+      final args = _buildArgs(prompt, cfg);
+      final env = _buildEnvironment();
+
+      _process = await Process.start(
+        _llamaCliPath!, 
+        args,
+        environment: env,
+      );
+      
+      // Buffer for detecting repetition
+      final outputBuffer = StringBuffer();
+      String lastChunk = '';
+      int repetitionCount = 0;
+      const maxRepetitions = 3;
+      
+      // Stream stdout with repetition detection
+      await for (final chunk in _process!.stdout.transform(utf8.decoder)) {
+        // Detect repetitive output (model looping)
+        if (chunk == lastChunk && chunk.length > 20) {
+          repetitionCount++;
+          if (repetitionCount >= maxRepetitions) {
+            // Model is looping, stop generation
+            stopGeneration();
+            break;
+          }
+        } else {
+          repetitionCount = 0;
+        }
+        lastChunk = chunk;
+        
+        outputBuffer.write(chunk);
+        yield chunk;
+      }
+
+      // Collect stderr but don't throw for info messages
+      final stderrOutput = await _process?.stderr.transform(utf8.decoder).join() ?? '';
+      _processStderr(stderrOutput);
+
+      await _process?.exitCode;
+    } catch (e) {
+      if (e.toString().contains('Process was killed')) {
+        // User stopped generation, not an error
+        return;
+      }
+      rethrow;
+    } finally {
+      _isGenerating = false;
+      _process = null;
+    }
+  }
+
+  /// Process stderr output, filtering out info messages and throwing on real errors
+  void _processStderr(String stderr) {
+    if (stderr.isEmpty) return;
+    
+    // Patterns that indicate info/warning messages, not errors
+    final infoPatterns = [
+      RegExp(r'^llama_', multiLine: true),
+      RegExp(r'^llm_', multiLine: true),
+      RegExp(r'^ggml_', multiLine: true),
+      RegExp(r'^gguf', multiLine: true),
+      RegExp(r'sampling', caseSensitive: false),
+      RegExp(r'main:', caseSensitive: false),
+      RegExp(r'sampler', caseSensitive: false),
+      RegExp(r'generate:', caseSensitive: false),
+      RegExp(r'n_predict', caseSensitive: false),
+      RegExp(r'vocab', caseSensitive: false),
+      RegExp(r'model size', caseSensitive: false),
+      RegExp(r'warmup', caseSensitive: false),
+      RegExp(r'load time', caseSensitive: false),
+      RegExp(r'eval time', caseSensitive: false),
+      RegExp(r'total time', caseSensitive: false),
+      RegExp(r'tokens per second', caseSensitive: false),
+      RegExp(r'^\s*$', multiLine: true), // empty lines
+      RegExp(r'^\[', multiLine: true), // log prefixes like [timestamp]
+      RegExp(r'ctx_size', caseSensitive: false),
+      RegExp(r'batch', caseSensitive: false),
+      RegExp(r'threads', caseSensitive: false),
+      RegExp(r'memory', caseSensitive: false),
+      RegExp(r'kv_cache', caseSensitive: false),
+      RegExp(r'loading', caseSensitive: false),
+    ];
+    
+    final lines = stderr.split('\n');
+    final realErrors = <String>[];
+    
+    for (final line in lines) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      
+      bool isInfoMessage = false;
+      for (final pattern in infoPatterns) {
+        if (pattern.hasMatch(trimmed)) {
+          isInfoMessage = true;
+          break;
+        }
+      }
+      
+      if (!isInfoMessage) {
+        realErrors.add(trimmed);
       }
     }
-
-    await _process!.exitCode;
-    _process = null;
+    
+    // Only throw if there are actual error messages
+    if (realErrors.isNotEmpty) {
+      final errorMsg = realErrors.join('\n');
+      // Check for common recoverable situations
+      if (errorMsg.contains('context window') || errorMsg.contains('too long')) {
+        throw Exception('Input too long for model context. Try a shorter message.');
+      }
+      // Don't throw for everything, just log warnings
+      // throw Exception(errorMsg);
+    }
   }
 
   /// Generate a complete response (non-streaming)
-  Future<String> generate(String prompt, {int maxTokens = 512}) async {
+  Future<String> generate(String prompt, {LLMConfig? overrideConfig}) async {
     final buffer = StringBuffer();
-    await for (final chunk in generateStream(prompt, maxTokens: maxTokens)) {
+    await for (final chunk in generateStream(prompt, overrideConfig: overrideConfig)) {
       buffer.write(chunk);
     }
     return buffer.toString().trim();
@@ -117,61 +296,71 @@ class LLMService {
     // Get the executable's directory (for bundled apps)
     final execDir = path.dirname(Platform.resolvedExecutable);
     
-    // Check common locations
-    final possiblePaths = [
-      // Bundled with app
-      path.join(execDir, 'llama-cli'),
-      path.join(execDir, 'bin', 'llama-cli'),
-      path.join(execDir, 'lib', 'llama-cli'),
-      path.join(execDir, '..', 'lib', 'llama-cli'),
-      path.join(execDir, '..', 'Resources', 'llama-cli'), // macOS app bundle
-      // Current directory
-      path.join(Directory.current.path, 'llama-cli'),
-      path.join(Directory.current.path, 'bin', 'llama-cli'),
+    // Determine executable name based on platform
+    final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
+    
+    // Check common locations in order of priority
+    final possiblePaths = <String>[
+      // Bundled with app (most common for distributed apps)
+      path.join(execDir, 'lib', exeName),
+      path.join(execDir, exeName),
+      path.join(execDir, 'bin', exeName),
+      path.join(execDir, '..', 'lib', exeName),
+      path.join(execDir, '..', 'Resources', exeName), // macOS app bundle
+      
+      // Development paths
+      path.join(Directory.current.path, 'bin', exeName),
+      path.join(Directory.current.path, exeName),
+      
       // System paths
       '/usr/local/bin/llama-cli',
       '/usr/bin/llama-cli',
-      // Windows variants
-      path.join(execDir, 'llama-cli.exe'),
-      path.join(execDir, 'bin', 'llama-cli.exe'),
-      path.join(Directory.current.path, 'llama-cli.exe'),
-      path.join(Directory.current.path, 'bin', 'llama-cli.exe'),
     ];
 
     // Check explicit paths first
     for (final p in possiblePaths) {
-      if (await File(p).exists()) {
-        return p;
+      try {
+        if (await File(p).exists()) {
+          // Verify it's executable
+          if (!Platform.isWindows) {
+            final result = await Process.run('test', ['-x', p]);
+            if (result.exitCode != 0) continue;
+          }
+          return p;
+        }
+      } catch (_) {
+        continue;
       }
     }
 
-    // Check if in PATH (Linux/macOS)
-    if (!Platform.isWindows) {
-      try {
-        final result = await Process.run('which', ['llama-cli']);
-        if (result.exitCode == 0) {
-          return (result.stdout as String).trim();
+    // Check system PATH
+    try {
+      final command = Platform.isWindows ? 'where' : 'which';
+      final result = await Process.run(command, ['llama-cli']);
+      if (result.exitCode == 0) {
+        final foundPath = (result.stdout as String).trim().split('\n').first;
+        if (foundPath.isNotEmpty) {
+          return foundPath;
         }
-      } catch (_) {}
-    }
-
-    // Windows: use where instead
-    if (Platform.isWindows) {
-      try {
-        final result = await Process.run('where', ['llama-cli']);
-        if (result.exitCode == 0) {
-          return (result.stdout as String).trim().split('\n').first;
-        }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     return null;
   }
 
   /// Stop any ongoing generation
   void stopGeneration() {
-    _process?.kill();
-    _process = null;
+    if (_process != null) {
+      try {
+        _process!.kill(ProcessSignal.sigterm);
+      } catch (_) {
+        try {
+          _process!.kill(ProcessSignal.sigkill);
+        } catch (_) {}
+      }
+      _process = null;
+    }
+    _isGenerating = false;
   }
 
   /// Unload the current model
@@ -179,10 +368,31 @@ class LLMService {
     stopGeneration();
     _modelPath = null;
     _isLoaded = false;
+    _llamaCliPath = null;
   }
 
   /// Dispose resources
   void dispose() {
     unloadModel();
+  }
+  
+  /// Get model info (file name and size)
+  Future<Map<String, dynamic>?> getModelInfo() async {
+    if (_modelPath == null) return null;
+    
+    try {
+      final file = File(_modelPath!);
+      final stat = await file.stat();
+      final sizeInMB = (stat.size / (1024 * 1024)).toStringAsFixed(1);
+      
+      return {
+        'path': _modelPath,
+        'name': path.basename(_modelPath!),
+        'size': stat.size,
+        'sizeFormatted': '${sizeInMB} MB',
+      };
+    } catch (_) {
+      return null;
+    }
   }
 }
