@@ -39,6 +39,15 @@ dependencies:
   ffi: ^2.1.3
   path: any
   provider: ^6.1.5+1
+  
+  # RAG document processing
+  syncfusion_flutter_pdf: ^27.1.48  # PDF text extraction (free community license)
+  archive: ^3.6.1                   # For DOCX extraction (ZIP handling)
+  xml: ^6.5.0                       # For DOCX XML parsing
+  
+  # Database storage (cross-platform)
+  sqflite: ^2.3.2                   # SQLite for mobile
+  sqflite_common_ffi: ^2.3.2+1      # SQLite for desktop (Linux/Windows/macOS)
 
 dev_dependencies:
   flutter_test:

@@ -68,10 +68,12 @@ echo "=== Building Flutter app for $PLATFORM ==="
 case "$PLATFORM" in
     linux)
         flutter build linux --release
-        cp bin/* build/linux/x64/release/bundle/lib/
+        mkdir -p build/linux/x64/release/bundle/bin
+        cp bin/llama-cli build/linux/x64/release/bundle/bin/
+        cp bin/*.so build/linux/x64/release/bundle/lib/ 2>/dev/null || true
         echo ""
         echo "Build complete! Run with:"
-        echo "  cd build/linux/x64/release/bundle && LD_LIBRARY_PATH=./lib:\$LD_LIBRARY_PATH ./offline_llm"
+        echo "  cd build/linux/x64/release/bundle && ./offline_llm"
         ;;
     macos)
         flutter build macos --release

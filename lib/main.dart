@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:offline_llm/screens/chat_screen.dart';
 import 'package:offline_llm/providers/chat_provider.dart';
+import 'package:offline_llm/providers/document_provider.dart';
 import 'package:provider/provider.dart';
 
 void main() {
@@ -13,8 +14,11 @@ class OfflineLLMApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => ChatProvider(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ChatProvider()),
+        ChangeNotifierProvider(create: (_) => DocumentProvider()),
+      ],
       child: MaterialApp(
         title: 'Offline LLM',
         debugShowCheckedModeBanner: false,

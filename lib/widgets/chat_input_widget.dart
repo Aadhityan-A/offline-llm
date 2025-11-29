@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:offline_llm/providers/chat_provider.dart';
+import 'package:offline_llm/providers/document_provider.dart';
 
 class ChatInputWidget extends StatefulWidget {
   const ChatInputWidget({super.key});
@@ -20,11 +21,32 @@ class _ChatInputWidgetState extends State<ChatInputWidget> {
     super.dispose();
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    context.read<ChatProvider>().sendMessage(text);
+    final chatProvider = context.read<ChatProvider>();
+    final docProvider = context.read<DocumentProvider>();
+    
+    // If documents are uploaded, retrieve relevant context
+    String? ragContext;
+    List<String>? sourceDocuments;
+    
+    if (docProvider.hasDocuments) {
+      final results = await docProvider.retrieveContext(text, topK: 3, minScore: 0.1);
+      if (results.isNotEmpty) {
+        ragContext = docProvider.buildContextString(results);
+        sourceDocuments = docProvider.getSourceReferences(results);
+      }
+    }
+    
+    // Send message with RAG context if available
+    chatProvider.sendMessage(
+      text,
+      ragContext: ragContext,
+      sourceDocuments: sourceDocuments,
+    );
+    
     _controller.clear();
     _focusNode.requestFocus();
   }

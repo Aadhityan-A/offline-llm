@@ -105,7 +105,8 @@ class LLMService {
   }
 
   /// Build command line arguments for llama-cli
-  List<String> _buildArgs(String prompt, LLMConfig cfg) {
+  /// If chatTemplate is provided, uses llama.cpp's built-in chat template
+  List<String> _buildArgs(String prompt, LLMConfig cfg, {String? chatTemplate}) {
     final args = <String>[
       '-m', _modelPath!,
       '-p', prompt,
@@ -117,7 +118,13 @@ class LLMService {
       '--top-p', cfg.topP.toString(),
       '--top-k', cfg.topK.toString(),
       '--no-display-prompt',
+      '-no-cnv',
     ];
+    
+    // Use native chat template if specified
+    if (chatTemplate != null && chatTemplate.isNotEmpty) {
+      args.addAll(['--chat-template', chatTemplate]);
+    }
     
     // Add stop sequences using --reverse-prompt (correct llama-cli argument)
     for (final stop in cfg.stopSequences) {
@@ -146,7 +153,8 @@ class LLMService {
   }
 
   /// Generate a response using the loaded model (streaming)
-  Stream<String> generateStream(String prompt, {LLMConfig? overrideConfig}) async* {
+  /// chatTemplate: optional llama.cpp chat template name (e.g., 'llama3', 'chatml', 'phi3')
+  Stream<String> generateStream(String prompt, {LLMConfig? overrideConfig, String? chatTemplate}) async* {
     if (!_isLoaded || _modelPath == null) {
       throw Exception('No model loaded. Please load a model first.');
     }
@@ -162,12 +170,10 @@ class LLMService {
     _isGenerating = true;
     
     try {
-      final cfg = overrideConfig ?? config.copyWith(
-        // Default stop sequences for chat format
-        stopSequences: ['User:', '\nUser:', 'Human:', '\nHuman:'],
-      );
+      // Use provided config or defaults (no stop sequences - rely on model's EOS token)
+      final cfg = overrideConfig ?? config;
       
-      final args = _buildArgs(prompt, cfg);
+      final args = _buildArgs(prompt, cfg, chatTemplate: chatTemplate);
       final env = _buildEnvironment();
 
       _process = await Process.start(
@@ -183,7 +189,7 @@ class LLMService {
       const maxRepetitions = 3;
       
       // Stream stdout with repetition detection
-      await for (final chunk in _process!.stdout.transform(utf8.decoder)) {
+      await for (final chunk in _process!.stdout.transform(const Utf8Decoder(allowMalformed: true))) {
         // Detect repetitive output (model looping)
         if (chunk == lastChunk && chunk.length > 20) {
           repetitionCount++;
@@ -283,9 +289,9 @@ class LLMService {
   }
 
   /// Generate a complete response (non-streaming)
-  Future<String> generate(String prompt, {LLMConfig? overrideConfig}) async {
+  Future<String> generate(String prompt, {LLMConfig? overrideConfig, String? chatTemplate}) async {
     final buffer = StringBuffer();
-    await for (final chunk in generateStream(prompt, overrideConfig: overrideConfig)) {
+    await for (final chunk in generateStream(prompt, overrideConfig: overrideConfig, chatTemplate: chatTemplate)) {
       buffer.write(chunk);
     }
     return buffer.toString().trim();
