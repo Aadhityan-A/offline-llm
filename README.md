@@ -19,8 +19,7 @@ A cross-platform offline Large Language Model chat application that runs GGUF mo
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshot1.png" width="400" alt="Welcome Screen">
-  <img src="docs/screenshot2.png" width="400" alt="Chat Interface">
+   <img src="docs/screenshots/screenshot1.png" width="600" alt="Welcome Screen">
 </p>
 
 ## Installation
