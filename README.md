@@ -31,10 +31,12 @@ Download the latest release for your platform from the [Releases](https://github
 
 | Platform | Download |
 |----------|----------|
-| Windows | [offline-llm-windows.zip](https://github.com/Aadhityan-A/offline-llm/releases/latest) |
-| macOS | [offline-llm-macos.zip](https://github.com/Aadhityan-A/offline-llm/releases/latest) |
-| Linux | [offline-llm-linux.tar.gz](https://github.com/Aadhityan-A/offline-llm/releases/latest) |
-| Android | [offline-llm.apk](https://github.com/Aadhityan-A/offline-llm/releases/latest) |
+| Windows | [offline-llm-windows-x64.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-windows-x64.zip) |
+| macOS | [offline-llm-macos.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-macos.zip) |
+| Linux (tar) | [offline-llm-linux-x64.tar.gz](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-linux-x64.tar.gz) |
+| Linux (DEB) | [offline-llm_1.0_amd64.deb](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm_1.0_amd64.deb) |
+| Linux (RPM) | [offline-llm-1.0.x86_64.rpm](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-1.0.x86_64.rpm) |
+| Android | [offline-llm-android.apk](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-android.apk) |
 
 ### Building from Source
 
