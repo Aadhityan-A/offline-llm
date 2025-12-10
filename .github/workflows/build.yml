@@ -1,0 +1,526 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.6.0)'
+        required: false
+        default: '1.0.0'
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  APP_VERSION: '1.0.0'
+  APP_NAME: 'offline-llm'
+  APP_DISPLAY_NAME: 'Offline LLM'
+  APP_DESCRIPTION: 'A privacy-focused, offline AI chat application powered by local LLMs'
+  APP_AUTHOR: 'Aadhityan A'
+  APP_EMAIL: 'aadhityan@example.com'
+  APP_HOMEPAGE: 'https://github.com/Aadhityan-A/offline-llm'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ "${{ github.event.inputs.version }}" != "" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${{ env.APP_VERSION }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libgtk-3-dev patchelf libsqlite3-dev
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+
+      - name: Build llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_build
+          cd llama_cpp_build
+          cmake -B build -DLLAMA_CURL=OFF -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
+          cmake --build build --config Release -j$(nproc) -- llama-cli
+          cd ..
+          mkdir -p bin
+          cp llama_cpp_build/build/bin/llama-cli bin/
+          cp llama_cpp_build/build/bin/*.so bin/
+          # Strip invalid RPATH from binaries
+          for f in bin/*; do
+            if file "$f" | grep -q ELF; then
+              patchelf --remove-rpath "$f" 2>/dev/null || true
+              patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
+            fi
+          done
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Linux
+        run: flutter build linux --release
+
+      - name: Bundle app
+        run: |
+          mkdir -p build/linux/x64/release/bundle/bin
+          cp bin/llama-cli build/linux/x64/release/bundle/bin/
+          cp bin/*.so build/linux/x64/release/bundle/lib/ 2>/dev/null || true
+          cd build/linux/x64/release
+          tar -czvf offline-llm-linux-x64.tar.gz bundle
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: build/linux/x64/release/offline-llm-linux-x64.tar.gz
+
+      - name: Upload bundle for packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: build/linux/x64/release/bundle
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+
+      - name: Build llama.cpp
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_build
+          cd llama_cpp_build
+          cmake -B build -DLLAMA_CURL=OFF
+          cmake --build build --config Release --target llama-cli
+          cd ..
+          New-Item -ItemType Directory -Force -Path bin
+          Copy-Item llama_cpp_build/build/bin/Release/llama-cli.exe bin/
+          Copy-Item llama_cpp_build/build/bin/Release/*.dll bin/ -ErrorAction SilentlyContinue
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Bundle app
+        shell: pwsh
+        run: |
+          Copy-Item bin/* build/windows/x64/runner/Release/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath offline-llm-windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: offline-llm-windows-x64.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+
+      - name: Build llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_build
+          cd llama_cpp_build
+          cmake -B build -DLLAMA_CURL=OFF
+          cmake --build build --config Release -j$(sysctl -n hw.ncpu) -- llama-cli
+          cd ..
+          mkdir -p bin
+          cp llama_cpp_build/build/bin/llama-cli bin/
+          cp llama_cpp_build/build/bin/*.dylib bin/ 2>/dev/null || true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build macOS
+        run: flutter build macos --release
+
+      - name: Bundle app
+        run: |
+          mkdir -p build/macos/Build/Products/Release/offline_llm.app/Contents/Resources
+          cp bin/* build/macos/Build/Products/Release/offline_llm.app/Contents/Resources/
+          cd build/macos/Build/Products/Release
+          zip -r offline-llm-macos.zip offline_llm.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: build/macos/Build/Products/Release/offline-llm-macos.zip
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+
+      - name: Build llama.cpp for Android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_build
+          cd llama_cpp_build
+          
+          # Build for arm64-v8a
+          mkdir -p build-android-arm64
+          cd build-android-arm64
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DLLAMA_CURL=OFF \
+            -DGGML_OPENMP=OFF
+          cmake --build . --config Release -j$(nproc) -- llama-cli
+          cd ..
+          
+          # Create Android libs directory
+          mkdir -p ../android/app/src/main/jniLibs/arm64-v8a
+          cp build-android-arm64/bin/llama-cli ../android/app/src/main/jniLibs/arm64-v8a/
+          cp build-android-arm64/bin/*.so ../android/app/src/main/jniLibs/arm64-v8a/
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk offline-llm-android.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: offline-llm-android.apk
+
+  build-deb:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-bundle
+          path: bundle
+
+      - name: Create DEB package structure
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          PKG_DIR="offline-llm_${VERSION}_amd64"
+          
+          # Create directory structure
+          mkdir -p ${PKG_DIR}/DEBIAN
+          mkdir -p ${PKG_DIR}/usr/bin
+          mkdir -p ${PKG_DIR}/usr/lib/offline-llm
+          mkdir -p ${PKG_DIR}/usr/share/applications
+          mkdir -p ${PKG_DIR}/usr/share/icons/hicolor/256x256/apps
+          mkdir -p ${PKG_DIR}/usr/share/doc/offline-llm
+          
+          # Copy application files
+          cp -r bundle/* ${PKG_DIR}/usr/lib/offline-llm/
+          
+          # Create launcher script
+          cat > ${PKG_DIR}/usr/bin/offline-llm << 'EOF'
+          #!/bin/bash
+          cd /usr/lib/offline-llm
+          LD_LIBRARY_PATH="./lib:$LD_LIBRARY_PATH" ./offline_llm "$@"
+          EOF
+          chmod +x ${PKG_DIR}/usr/bin/offline-llm
+          
+          # Create desktop entry
+          cat > ${PKG_DIR}/usr/share/applications/offline-llm.desktop << EOF
+          [Desktop Entry]
+          Name=${{ env.APP_DISPLAY_NAME }}
+          Comment=${{ env.APP_DESCRIPTION }}
+          Exec=/usr/bin/offline-llm
+          Icon=offline-llm
+          Terminal=false
+          Type=Application
+          Categories=Utility;Chat;AI;
+          Keywords=AI;LLM;Chat;Offline;Privacy;
+          EOF
+          
+          # Create control file
+          cat > ${PKG_DIR}/DEBIAN/control << EOF
+          Package: offline-llm
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: libgtk-3-0, libblkid1, liblzma5
+          Maintainer: ${{ env.APP_AUTHOR }} <${{ env.APP_EMAIL }}>
+          Homepage: ${{ env.APP_HOMEPAGE }}
+          Description: ${{ env.APP_DISPLAY_NAME }}
+           ${{ env.APP_DESCRIPTION }}
+           .
+           Features:
+           - Run AI models completely offline
+           - Privacy-focused design
+           - Support for various GGUF models
+           - Cross-platform compatibility
+          EOF
+          
+          # Create copyright file
+          cat > ${PKG_DIR}/usr/share/doc/offline-llm/copyright << EOF
+          Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+          Upstream-Name: offline-llm
+          Upstream-Contact: ${{ env.APP_AUTHOR }} <${{ env.APP_EMAIL }}>
+          Source: ${{ env.APP_HOMEPAGE }}
+          
+          Files: *
+          Copyright: $(date +%Y) ${{ env.APP_AUTHOR }}
+          License: CeCILL-V2.1
+          EOF
+          
+          # Create postinst script
+          cat > ${PKG_DIR}/DEBIAN/postinst << 'EOF'
+          #!/bin/bash
+          set -e
+          # Update desktop database
+          if command -v update-desktop-database &> /dev/null; then
+              update-desktop-database /usr/share/applications || true
+          fi
+          # Update icon cache
+          if command -v gtk-update-icon-cache &> /dev/null; then
+              gtk-update-icon-cache /usr/share/icons/hicolor || true
+          fi
+          EOF
+          chmod +x ${PKG_DIR}/DEBIAN/postinst
+          
+          # Create postrm script
+          cat > ${PKG_DIR}/DEBIAN/postrm << 'EOF'
+          #!/bin/bash
+          set -e
+          if command -v update-desktop-database &> /dev/null; then
+              update-desktop-database /usr/share/applications || true
+          fi
+          EOF
+          chmod +x ${PKG_DIR}/DEBIAN/postrm
+          
+          # Set proper permissions
+          find ${PKG_DIR} -type d -exec chmod 755 {} \;
+          find ${PKG_DIR}/usr -type f -exec chmod 644 {} \;
+          chmod 755 ${PKG_DIR}/usr/bin/offline-llm
+          chmod 755 ${PKG_DIR}/usr/lib/offline-llm/offline_llm
+          chmod 755 ${PKG_DIR}/DEBIAN/postinst
+          chmod 755 ${PKG_DIR}/DEBIAN/postrm
+
+      - name: Build DEB package
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          PKG_DIR="offline-llm_${VERSION}_amd64"
+          dpkg-deb --build --root-owner-group ${PKG_DIR}
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-release
+          path: offline-llm_*.deb
+
+  build-rpm:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RPM build tools
+        run: |
+          dnf install -y rpm-build rpmdevtools patchelf
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-bundle
+          path: bundle
+
+      - name: Fix RPATH in bundle binaries
+        run: |
+          # Fix RPATH in all ELF binaries to avoid RPM check failures
+          for f in bundle/lib/*; do
+            if file "$f" 2>/dev/null | grep -q ELF; then
+              patchelf --remove-rpath "$f" 2>/dev/null || true
+              patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
+            fi
+          done
+          if file bundle/offline_llm 2>/dev/null | grep -q ELF; then
+            patchelf --remove-rpath bundle/offline_llm 2>/dev/null || true
+            patchelf --set-rpath '$ORIGIN/lib' bundle/offline_llm 2>/dev/null || true
+          fi
+
+      - name: Setup RPM build environment
+        run: |
+          rpmdev-setuptree
+
+      - name: Create RPM spec file
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          
+          cat > ~/rpmbuild/SPECS/offline-llm.spec << EOF
+          Name:           offline-llm
+          Version:        ${VERSION}
+          Release:        1%{?dist}
+          Summary:        ${{ env.APP_DISPLAY_NAME }} - ${{ env.APP_DESCRIPTION }}
+          
+          License:        CeCILL-V2.1
+          URL:            ${{ env.APP_HOMEPAGE }}
+          
+          Requires:       gtk3
+          
+          %description
+          ${{ env.APP_DESCRIPTION }}
+          
+          Features:
+          - Run AI models completely offline
+          - Privacy-focused design
+          - Support for various GGUF models
+          - Cross-platform compatibility
+          
+          %install
+          mkdir -p %{buildroot}/usr/lib/offline-llm
+          mkdir -p %{buildroot}/usr/bin
+          mkdir -p %{buildroot}/usr/share/applications
+          mkdir -p %{buildroot}/usr/share/icons/hicolor/256x256/apps
+          
+          cp -r %{_sourcedir}/bundle/* %{buildroot}/usr/lib/offline-llm/
+          
+          # Create launcher script
+          cat > %{buildroot}/usr/bin/offline-llm << 'LAUNCHER'
+          #!/bin/bash
+          cd /usr/lib/offline-llm
+          LD_LIBRARY_PATH="./lib:\$LD_LIBRARY_PATH" ./offline_llm "\$@"
+          LAUNCHER
+          chmod +x %{buildroot}/usr/bin/offline-llm
+          
+          # Create desktop entry
+          cat > %{buildroot}/usr/share/applications/offline-llm.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=${{ env.APP_DISPLAY_NAME }}
+          Comment=${{ env.APP_DESCRIPTION }}
+          Exec=/usr/bin/offline-llm
+          Icon=offline-llm
+          Terminal=false
+          Type=Application
+          Categories=Utility;Chat;AI;
+          Keywords=AI;LLM;Chat;Offline;Privacy;
+          DESKTOP
+          
+          %files
+          /usr/lib/offline-llm
+          /usr/bin/offline-llm
+          /usr/share/applications/offline-llm.desktop
+          
+          %post
+          update-desktop-database /usr/share/applications &>/dev/null || :
+          gtk-update-icon-cache /usr/share/icons/hicolor &>/dev/null || :
+          
+          %postun
+          update-desktop-database /usr/share/applications &>/dev/null || :
+          
+          %changelog
+          * $(date '+%a %b %d %Y') ${{ env.APP_AUTHOR }} <${{ env.APP_EMAIL }}> - ${VERSION}-1
+          - Initial package release
+          EOF
+
+      - name: Copy bundle to SOURCES
+        run: |
+          cp -r bundle ~/rpmbuild/SOURCES/
+
+      - name: Build RPM package
+        run: |
+          rpmbuild -bb ~/rpmbuild/SPECS/offline-llm.spec
+
+      - name: Copy RPM to workspace
+        run: |
+          VERSION="${{ needs.build-linux.outputs.version }}"
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm ./offline-llm-${VERSION}.x86_64.rpm || \
+          cp ~/rpmbuild/RPMS/noarch/*.rpm ./offline-llm-${VERSION}.noarch.rpm || \
+          find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} ./ \;
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-release
+          path: "*.rpm"
+
+  release:
+    needs: [build-linux, build-windows, build-macos, build-android, build-deb, build-rpm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/linux-release/offline-llm-linux-x64.tar.gz
+            artifacts/windows-release/offline-llm-windows-x64.zip
+            artifacts/macos-release/offline-llm-macos.zip
+            artifacts/android-release/offline-llm-android.apk
+            artifacts/deb-release/*.deb
+            artifacts/rpm-release/*.rpm
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
