@@ -1,6 +1,6 @@
 # Offline LLM
 
-A cross-platform offline Large Language Model chat application that runs GGUF models locally on your device.
+A cross-platform offline Large Language Model chat application that runs GGUF models locally on any device.
 
 ![Offline LLM](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-blue)
 ![License](https://img.shields.io/badge/License-CeCILL--V2.1-blue)
@@ -8,13 +8,13 @@ A cross-platform offline Large Language Model chat application that runs GGUF mo
 
 ## Features
 
-- 🔒 **100% Offline** - No internet connection required after installation
-- 🚀 **Fast Inference** - Powered by llama.cpp for optimized performance
-- 🌍 **Cross-Platform** - Works on Windows, macOS, Linux, and Android
-- 📁 **GGUF Support** - Load any GGUF format model from Hugging Face
-- 💬 **Chat Interface** - Clean, intuitive chat UI with streaming responses
-- 🎨 **Material Design 3** - Modern UI with light/dark mode support
-- 🔐 **Privacy-Focused** - All processing happens locally on your device
+-  **100% Offline** - No internet connection required after installation
+-  **Fast Inference** - Powered by llama.cpp for optimized performance
+-  **Cross-Platform** - Works on Windows, macOS, Linux, and Android
+-  **GGUF Support** - Load any GGUF format model
+-  **Chat Interface** - Clean, intuitive chat UI with streaming responses
+-  **Material Design 3** - Modern UI with light/dark mode support
+-  **Privacy-Focused** - All processing happens locally on your device
 
 ## Screenshots
 
@@ -161,11 +161,3 @@ This project is licensed under the CeCILL Free Software License Agreement (Versi
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - GGUF inference engine
 - [Flutter](https://flutter.dev/) - Cross-platform UI framework
 - [Hugging Face](https://huggingface.co/) - Model hosting
-
-## Support
-
-If you find this project helpful, please consider giving it a ⭐ on GitHub!
-
----
-
-Made with ❤️ by [Aadhityan](https://github.com/Aadhityan-A)
