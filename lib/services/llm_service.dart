@@ -327,36 +327,22 @@ class LLMService {
       buffer.write(chunk);
     }
     return buffer.toString().trim();
+  }
 
-      final exitCode = await _process?.exitCode;
-
-      // Ensure stderr is fully consumed before processing it.
-      if (stderrSub != null) {
-        await stderrSub.cancel();
-        stderrSub = null;
-      }
-
-      // Collect any stderr output we drained during generation.
-      final stderrOutput = stderrBuffer.toString();
-      _processStderr(stderrOutput);
-
-      // If the process exited unexpectedly, surface a helpful error.
-      if (exitCode != null && exitCode != 0 && !_isGenerating) {
-        // stopGeneration() sets _isGenerating=false; treat user stop as non-error.
-        return;
-      }
+  /// Find llama-cli executable
+  Future<String?> _findLlamaCli() async {
+    final execDir = path.dirname(Platform.resolvedExecutable);
+    
+    // Base executable name without extension
+    const baseExeName = 'llama-cli';
+    
     // Determine executable name based on platform
-    final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
+    final exeName = Platform.isWindows ? '$baseExeName.exe' : baseExeName;
     
     // Check common locations in order of priority
     final possiblePaths = <String>[
       // Bundled with app (most common for distributed apps)
       path.join(execDir, 'lib', exeName),
-      if (stderrSub != null) {
-        try {
-          await stderrSub.cancel();
-        } catch (_) {}
-      }
       path.join(execDir, exeName),
       path.join(execDir, 'bin', exeName),
       path.join(execDir, '..', 'lib', exeName),
@@ -365,39 +351,63 @@ class LLMService {
       // Development paths
       path.join(Directory.current.path, 'bin', exeName),
       path.join(Directory.current.path, exeName),
-      
-      // System paths
-      '/usr/local/bin/llama-cli',
-      '/usr/bin/llama-cli',
     ];
-
-    // Check explicit paths first
-    for (final p in possiblePaths) {
+    
+    // On Windows, only check Windows-specific paths
+    if (Platform.isWindows) {
+      // Check explicit paths first
+      for (final p in possiblePaths) {
+        try {
+          if (await File(p).exists()) {
+            return p;
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+      
+      // Check system PATH
       try {
-        if (await File(p).exists()) {
-          // Verify it's executable
-          if (!Platform.isWindows) {
+        final result = await Process.run('where', [baseExeName]);
+        if (result.exitCode == 0) {
+          final foundPath = (result.stdout as String).trim().split('\n').first;
+          if (foundPath.isNotEmpty) {
+            return foundPath;
+          }
+        }
+      } catch (_) {}
+    } else {
+      // On Unix-like systems (Linux, macOS), also check system paths
+      possiblePaths.addAll([
+        path.join('/usr/local/bin', exeName),
+        path.join('/usr/bin', exeName),
+      ]);
+      
+      // Check explicit paths first
+      for (final p in possiblePaths) {
+        try {
+          if (await File(p).exists()) {
+            // Verify it's executable
             final result = await Process.run('test', ['-x', p]);
             if (result.exitCode != 0) continue;
+            return p;
           }
-          return p;
+        } catch (_) {
+          continue;
         }
-      } catch (_) {
-        continue;
       }
-    }
 
-    // Check system PATH
-    try {
-      final command = Platform.isWindows ? 'where' : 'which';
-      final result = await Process.run(command, ['llama-cli']);
-      if (result.exitCode == 0) {
-        final foundPath = (result.stdout as String).trim().split('\n').first;
-        if (foundPath.isNotEmpty) {
-          return foundPath;
+      // Check system PATH
+      try {
+        final result = await Process.run('which', [baseExeName]);
+        if (result.exitCode == 0) {
+          final foundPath = (result.stdout as String).trim().split('\n').first;
+          if (foundPath.isNotEmpty) {
+            return foundPath;
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     return null;
   }
