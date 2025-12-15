@@ -333,8 +333,11 @@ class LLMService {
   Future<String?> _findLlamaCli() async {
     final execDir = path.dirname(Platform.resolvedExecutable);
     
+    // Base executable name without extension
+    const baseExeName = 'llama-cli';
+    
     // Determine executable name based on platform
-    final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
+    final exeName = Platform.isWindows ? '$baseExeName.exe' : baseExeName;
     
     // Check common locations in order of priority
     final possiblePaths = <String>[
@@ -365,7 +368,7 @@ class LLMService {
       
       // Check system PATH
       try {
-        final result = await Process.run('where', ['llama-cli']);
+        final result = await Process.run('where', [baseExeName]);
         if (result.exitCode == 0) {
           final foundPath = (result.stdout as String).trim().split('\n').first;
           if (foundPath.isNotEmpty) {
@@ -376,8 +379,8 @@ class LLMService {
     } else {
       // On Unix-like systems (Linux, macOS), also check system paths
       possiblePaths.addAll([
-        '/usr/local/bin/llama-cli',
-        '/usr/bin/llama-cli',
+        path.join('/usr/local/bin', exeName),
+        path.join('/usr/bin', exeName),
       ]);
       
       // Check explicit paths first
@@ -396,7 +399,7 @@ class LLMService {
 
       // Check system PATH
       try {
-        final result = await Process.run('which', ['llama-cli']);
+        final result = await Process.run('which', [baseExeName]);
         if (result.exitCode == 0) {
           final foundPath = (result.stdout as String).trim().split('\n').first;
           if (foundPath.isNotEmpty) {
