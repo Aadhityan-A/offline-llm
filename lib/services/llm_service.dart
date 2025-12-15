@@ -168,6 +168,8 @@ class LLMService {
     }
 
     _isGenerating = true;
+    StreamSubscription<String>? stderrSub;
+    final stderrBuffer = StringBuffer();
     
     try {
       // Use provided config or defaults (no stop sequences - rely on model's EOS token)
@@ -176,11 +178,20 @@ class LLMService {
       final args = _buildArgs(prompt, cfg, chatTemplate: chatTemplate);
       final env = _buildEnvironment();
 
-      _process = await Process.start(
+      final process = await Process.start(
         _llamaCliPath!, 
         args,
         environment: env,
       );
+      _process = process;
+
+      // IMPORTANT:
+      // Drain stderr concurrently while streaming stdout.
+      // On Windows, if stderr isn't drained, the pipe buffer can fill and block
+      // the process, making stdout appear to "not stream".
+      stderrSub = process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .listen(stderrBuffer.write);
       
       // Buffer for detecting repetition
       final outputBuffer = StringBuffer();
@@ -189,7 +200,7 @@ class LLMService {
       const maxRepetitions = 3;
       
       // Stream stdout with repetition detection
-      await for (final chunk in _process!.stdout.transform(const Utf8Decoder(allowMalformed: true))) {
+      await for (final chunk in process.stdout.transform(const Utf8Decoder(allowMalformed: true))) {
         // Detect repetitive output (model looping)
         if (chunk == lastChunk && chunk.length > 20) {
           repetitionCount++;
@@ -207,11 +218,27 @@ class LLMService {
         yield chunk;
       }
 
-      // Collect stderr but don't throw for info messages
-      final stderrOutput = await _process?.stderr.transform(utf8.decoder).join() ?? '';
+      final exitCode = await process.exitCode;
+
+      // Ensure stderr is fully consumed before processing it.
+      if (stderrSub != null) {
+        try {
+          await stderrSub.asFuture<void>();
+        } catch (_) {
+          // Ignore stderr stream errors.
+        }
+      }
+
+      final stderrOutput = stderrBuffer.toString();
       _processStderr(stderrOutput);
 
-      await _process?.exitCode;
+      // If stopped by user (or loop detection), don't treat non-zero exit as error.
+      if (!_isGenerating) return;
+
+      if (exitCode != 0) {
+        final msg = stderrOutput.trim();
+        throw Exception(msg.isNotEmpty ? msg : 'llama-cli exited with code $exitCode');
+      }
     } catch (e) {
       if (e.toString().contains('Process was killed')) {
         // User stopped generation, not an error
@@ -219,6 +246,11 @@ class LLMService {
       }
       rethrow;
     } finally {
+      if (stderrSub != null) {
+        try {
+          await stderrSub.cancel();
+        } catch (_) {}
+      }
       _isGenerating = false;
       _process = null;
     }
@@ -295,13 +327,24 @@ class LLMService {
       buffer.write(chunk);
     }
     return buffer.toString().trim();
-  }
 
-  /// Find llama-cli executable
-  Future<String?> _findLlamaCli() async {
-    // Get the executable's directory (for bundled apps)
-    final execDir = path.dirname(Platform.resolvedExecutable);
-    
+      final exitCode = await _process?.exitCode;
+
+      // Ensure stderr is fully consumed before processing it.
+      if (stderrSub != null) {
+        await stderrSub.cancel();
+        stderrSub = null;
+      }
+
+      // Collect any stderr output we drained during generation.
+      final stderrOutput = stderrBuffer.toString();
+      _processStderr(stderrOutput);
+
+      // If the process exited unexpectedly, surface a helpful error.
+      if (exitCode != null && exitCode != 0 && !_isGenerating) {
+        // stopGeneration() sets _isGenerating=false; treat user stop as non-error.
+        return;
+      }
     // Determine executable name based on platform
     final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
     
@@ -309,6 +352,11 @@ class LLMService {
     final possiblePaths = <String>[
       // Bundled with app (most common for distributed apps)
       path.join(execDir, 'lib', exeName),
+      if (stderrSub != null) {
+        try {
+          await stderrSub.cancel();
+        } catch (_) {}
+      }
       path.join(execDir, exeName),
       path.join(execDir, 'bin', exeName),
       path.join(execDir, '..', 'lib', exeName),
