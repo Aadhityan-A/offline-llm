@@ -121,6 +121,11 @@ class LLMService {
       '-no-cnv',
     ];
     
+    // On Windows, add --simple-io flag for unbuffered output (fixes streaming issues)
+    if (Platform.isWindows) {
+      args.add('--simple-io');
+    }
+    
     // Use native chat template if specified
     if (chatTemplate != null && chatTemplate.isNotEmpty) {
       args.addAll(['--chat-template', chatTemplate]);
@@ -168,8 +173,6 @@ class LLMService {
     }
 
     _isGenerating = true;
-    StreamSubscription<String>? stderrSub;
-    final stderrBuffer = StringBuffer();
     
     try {
       // Use provided config or defaults (no stop sequences - rely on model's EOS token)
@@ -178,20 +181,13 @@ class LLMService {
       final args = _buildArgs(prompt, cfg, chatTemplate: chatTemplate);
       final env = _buildEnvironment();
 
-      final process = await Process.start(
+      // On Windows, use runInShell to help with stdout buffering issues
+      _process = await Process.start(
         _llamaCliPath!, 
         args,
         environment: env,
+        runInShell: Platform.isWindows,
       );
-      _process = process;
-
-      // IMPORTANT:
-      // Drain stderr concurrently while streaming stdout.
-      // On Windows, if stderr isn't drained, the pipe buffer can fill and block
-      // the process, making stdout appear to "not stream".
-      stderrSub = process.stderr
-          .transform(const Utf8Decoder(allowMalformed: true))
-          .listen(stderrBuffer.write);
       
       // Buffer for detecting repetition
       final outputBuffer = StringBuffer();
@@ -199,46 +195,83 @@ class LLMService {
       int repetitionCount = 0;
       const maxRepetitions = 3;
       
-      // Stream stdout with repetition detection
-      await for (final chunk in process.stdout.transform(const Utf8Decoder(allowMalformed: true))) {
-        // Detect repetitive output (model looping)
-        if (chunk == lastChunk && chunk.length > 20) {
-          repetitionCount++;
-          if (repetitionCount >= maxRepetitions) {
-            // Model is looping, stop generation
-            stopGeneration();
-            break;
+      // On Windows, use a custom stream transformer for better streaming
+      // Windows often has buffering issues with stdout
+      if (Platform.isWindows) {
+        // Use byte-level streaming for Windows to get real-time output
+        final byteBuffer = <int>[];
+        await for (final bytes in _process!.stdout) {
+          byteBuffer.addAll(bytes);
+          
+          // Try to decode available bytes, handling incomplete UTF-8 sequences
+          String decoded = '';
+          int validEnd = byteBuffer.length;
+          
+          // Find the last valid UTF-8 boundary
+          while (validEnd > 0) {
+            try {
+              decoded = utf8.decode(byteBuffer.sublist(0, validEnd));
+              break;
+            } catch (e) {
+              validEnd--;
+            }
           }
-        } else {
-          repetitionCount = 0;
+          
+          if (decoded.isNotEmpty && validEnd > 0) {
+            byteBuffer.removeRange(0, validEnd);
+            
+            // Detect repetitive output (model looping)
+            if (decoded == lastChunk && decoded.length > 20) {
+              repetitionCount++;
+              if (repetitionCount >= maxRepetitions) {
+                stopGeneration();
+                break;
+              }
+            } else {
+              repetitionCount = 0;
+            }
+            lastChunk = decoded;
+            
+            outputBuffer.write(decoded);
+            yield decoded;
+          }
         }
-        lastChunk = chunk;
         
-        outputBuffer.write(chunk);
-        yield chunk;
-      }
-
-      final exitCode = await process.exitCode;
-
-      // Ensure stderr is fully consumed before processing it.
-      if (stderrSub != null) {
-        try {
-          await stderrSub.asFuture<void>();
-        } catch (_) {
-          // Ignore stderr stream errors.
+        // Flush any remaining bytes in buffer
+        if (byteBuffer.isNotEmpty) {
+          try {
+            final remaining = utf8.decode(byteBuffer, allowMalformed: true);
+            if (remaining.isNotEmpty) {
+              yield remaining;
+            }
+          } catch (_) {}
+        }
+      } else {
+        // Linux/macOS: Use standard stream transformer
+        await for (final chunk in _process!.stdout.transform(const Utf8Decoder(allowMalformed: true))) {
+          // Detect repetitive output (model looping)
+          if (chunk == lastChunk && chunk.length > 20) {
+            repetitionCount++;
+            if (repetitionCount >= maxRepetitions) {
+              // Model is looping, stop generation
+              stopGeneration();
+              break;
+            }
+          } else {
+            repetitionCount = 0;
+          }
+          lastChunk = chunk;
+          
+          outputBuffer.write(chunk);
+          yield chunk;
         }
       }
 
-      final stderrOutput = stderrBuffer.toString();
+      // Collect stderr but don't throw for info messages
+      final stderrOutput = await _process?.stderr.transform(utf8.decoder).join() ?? '';
       _processStderr(stderrOutput);
 
-      // If stopped by user (or loop detection), don't treat non-zero exit as error.
-      if (!_isGenerating) return;
-
-      if (exitCode != 0) {
-        final msg = stderrOutput.trim();
-        throw Exception(msg.isNotEmpty ? msg : 'llama-cli exited with code $exitCode');
-      }
+      await _process?.exitCode;
     } catch (e) {
       if (e.toString().contains('Process was killed')) {
         // User stopped generation, not an error
@@ -246,11 +279,6 @@ class LLMService {
       }
       rethrow;
     } finally {
-      if (stderrSub != null) {
-        try {
-          await stderrSub.cancel();
-        } catch (_) {}
-      }
       _isGenerating = false;
       _process = null;
     }
@@ -327,24 +355,13 @@ class LLMService {
       buffer.write(chunk);
     }
     return buffer.toString().trim();
+  }
 
-      final exitCode = await _process?.exitCode;
-
-      // Ensure stderr is fully consumed before processing it.
-      if (stderrSub != null) {
-        await stderrSub.cancel();
-        stderrSub = null;
-      }
-
-      // Collect any stderr output we drained during generation.
-      final stderrOutput = stderrBuffer.toString();
-      _processStderr(stderrOutput);
-
-      // If the process exited unexpectedly, surface a helpful error.
-      if (exitCode != null && exitCode != 0 && !_isGenerating) {
-        // stopGeneration() sets _isGenerating=false; treat user stop as non-error.
-        return;
-      }
+  /// Find llama-cli executable
+  Future<String?> _findLlamaCli() async {
+    // Get the executable's directory (for bundled apps)
+    final execDir = path.dirname(Platform.resolvedExecutable);
+    
     // Determine executable name based on platform
     final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
     
@@ -352,11 +369,6 @@ class LLMService {
     final possiblePaths = <String>[
       // Bundled with app (most common for distributed apps)
       path.join(execDir, 'lib', exeName),
-      if (stderrSub != null) {
-        try {
-          await stderrSub.cancel();
-        } catch (_) {}
-      }
       path.join(execDir, exeName),
       path.join(execDir, 'bin', exeName),
       path.join(execDir, '..', 'lib', exeName),
