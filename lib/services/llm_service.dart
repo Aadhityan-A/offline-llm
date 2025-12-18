@@ -56,6 +56,7 @@ class LLMService {
   Process? _process;
   String? _llamaCliPath;
   bool _isGenerating = false;
+  bool _usingLlamaCompletion = false;
   
   // Default configuration
   LLMConfig config = const LLMConfig();
@@ -84,12 +85,13 @@ class LLMService {
         throw Exception('Model file appears to be corrupted or incomplete.');
       }
       
-      // Find llama-cli before confirming model load
+      // Find llama executable before confirming model load
       _llamaCliPath = await _findLlamaCli();
       if (_llamaCliPath == null) {
+        final exeName = Platform.isWindows ? 'llama-completion' : 'llama-cli';
         throw Exception(
-          'llama-cli not found. Please ensure llama.cpp is properly installed.\n'
-          'Expected locations: bin/llama-cli, lib/llama-cli, or system PATH.'
+          '$exeName not found. Please ensure llama.cpp is properly installed.\n'
+          'Expected locations: bin/$exeName, lib/$exeName, or system PATH.'
         );
       }
       
@@ -104,8 +106,8 @@ class LLMService {
     }
   }
 
-  /// Build command line arguments for llama-cli
-  /// If chatTemplate is provided, uses llama.cpp's built-in chat template
+  /// Build command line arguments for llama-cli/llama-completion
+  /// If chatTemplate is provided, uses llama.cpp's built-in chat template (Linux/macOS only)
   List<String> _buildArgs(String prompt, LLMConfig cfg, {String? chatTemplate}) {
     final args = <String>[
       '-m', _modelPath!,
@@ -118,17 +120,19 @@ class LLMService {
       '--top-p', cfg.topP.toString(),
       '--top-k', cfg.topK.toString(),
       '--no-display-prompt',
-      '-no-cnv',
     ];
     
-    // On Windows, add --simple-io flag for unbuffered output (fixes streaming issues)
+    // On Windows, use llama-completion which has simpler output and auto-exits
+    // On Linux/macOS, use llama-cli with -no-cnv to disable conversation mode
     if (Platform.isWindows) {
+      // llama-completion doesn't need -no-cnv, it auto-exits after generation
       args.add('--simple-io');
-    }
-    
-    // Use native chat template if specified
-    if (chatTemplate != null && chatTemplate.isNotEmpty) {
-      args.addAll(['--chat-template', chatTemplate]);
+    } else {
+      args.add('-no-cnv');
+      // Use native chat template if specified (only for llama-cli on Linux/macOS)
+      if (chatTemplate != null && chatTemplate.isNotEmpty) {
+        args.addAll(['--chat-template', chatTemplate]);
+      }
     }
     
     // Add stop sequences using --reverse-prompt (correct llama-cli argument)
@@ -181,12 +185,32 @@ class LLMService {
       final args = _buildArgs(prompt, cfg, chatTemplate: chatTemplate);
       final env = _buildEnvironment();
 
-      // On Windows, use runInShell to help with stdout buffering issues
       _process = await Process.start(
         _llamaCliPath!, 
         args,
         environment: env,
-        runInShell: Platform.isWindows,
+      );
+
+      // Drain stderr concurrently to avoid Windows pipe backpressure blocking stdout.
+      final stderrBuffer = StringBuffer();
+      final stderrDone = Completer<void>();
+      late final StreamSubscription<String> stderrSub;
+      stderrSub = _process!.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .listen(
+        (chunk) {
+          // Avoid unbounded memory growth while still retaining useful diagnostics.
+          if (stderrBuffer.length < 256 * 1024) {
+            stderrBuffer.write(chunk);
+          }
+        },
+        onError: (_) {
+          if (!stderrDone.isCompleted) stderrDone.complete();
+        },
+        onDone: () {
+          if (!stderrDone.isCompleted) stderrDone.complete();
+        },
+        cancelOnError: false,
       );
       
       // Buffer for detecting repetition
@@ -200,51 +224,115 @@ class LLMService {
       if (Platform.isWindows) {
         // Use byte-level streaming for Windows to get real-time output
         final byteBuffer = <int>[];
-        await for (final bytes in _process!.stdout) {
-          byteBuffer.addAll(bytes);
-          
-          // Try to decode available bytes, handling incomplete UTF-8 sequences
-          String decoded = '';
-          int validEnd = byteBuffer.length;
-          
-          // Find the last valid UTF-8 boundary
-          while (validEnd > 0) {
-            try {
-              decoded = utf8.decode(byteBuffer.sublist(0, validEnd));
-              break;
-            } catch (e) {
-              validEnd--;
-            }
-          }
-          
-          if (decoded.isNotEmpty && validEnd > 0) {
-            byteBuffer.removeRange(0, validEnd);
-            
-            // Detect repetitive output (model looping)
-            if (decoded == lastChunk && decoded.length > 20) {
-              repetitionCount++;
-              if (repetitionCount >= maxRepetitions) {
-                stopGeneration();
-                break;
-              }
-            } else {
-              repetitionCount = 0;
-            }
-            lastChunk = decoded;
-            
-            outputBuffer.write(decoded);
-            yield decoded;
-          }
-        }
+        bool responseComplete = false;
         
-        // Flush any remaining bytes in buffer
-        if (byteBuffer.isNotEmpty) {
-          try {
-            final remaining = utf8.decode(byteBuffer, allowMalformed: true);
-            if (remaining.isNotEmpty) {
-              yield remaining;
+        // Create a StreamController to properly handle async streaming on Windows
+        final controller = StreamController<String>();
+        
+        // Process stdout in a separate async task
+        _process!.stdout.listen(
+          (bytes) {
+            if (responseComplete) return;
+            
+            byteBuffer.addAll(bytes);
+            
+            // Try to decode available bytes, handling incomplete UTF-8 sequences
+            String decoded = '';
+            int validEnd = byteBuffer.length;
+            
+            // Find the last valid UTF-8 boundary
+            while (validEnd > 0) {
+              try {
+                decoded = utf8.decode(byteBuffer.sublist(0, validEnd));
+                break;
+              } catch (e) {
+                validEnd--;
+              }
             }
-          } catch (_) {}
+            
+            if (decoded.isNotEmpty && validEnd > 0) {
+              byteBuffer.removeRange(0, validEnd);
+              
+              // Detect end of response markers from llama-completion
+              // It outputs "> " or "\n> " when waiting for next input
+              if (decoded.contains('\n> ') || decoded.endsWith('\n>') || decoded == '> ' || decoded == '>') {
+                // Remove the prompt from the output
+                decoded = decoded.replaceAll(RegExp(r'\n?>\s*$'), '');
+                if (decoded.isNotEmpty) {
+                  outputBuffer.write(decoded);
+                  controller.add(decoded);
+                }
+                responseComplete = true;
+                stopGeneration();
+                controller.close();
+                return;
+              }
+              
+              // Also check for end-of-generation stats line (appears before prompt)
+              // Format: "[ Prompt: X.X t/s | Generation: X.X t/s ]"
+              if (decoded.contains('[ Prompt:') && decoded.contains('Generation:')) {
+                // Remove the stats line from output
+                final statsMatch = RegExp(r'\[?\s*Prompt:[^\]]*\]?\s*').firstMatch(decoded);
+                if (statsMatch != null) {
+                  decoded = decoded.substring(0, statsMatch.start);
+                }
+                if (decoded.trim().isNotEmpty) {
+                  outputBuffer.write(decoded);
+                  controller.add(decoded);
+                }
+                responseComplete = true;
+                stopGeneration();
+                controller.close();
+                return;
+              }
+              
+              // Detect repetitive output (model looping)
+              if (decoded == lastChunk && decoded.length > 20) {
+                repetitionCount++;
+                if (repetitionCount >= maxRepetitions) {
+                  stopGeneration();
+                  controller.close();
+                  return;
+                }
+              } else {
+                repetitionCount = 0;
+              }
+              lastChunk = decoded;
+              
+              outputBuffer.write(decoded);
+              controller.add(decoded);
+            }
+          },
+          onError: (error) {
+            if (!controller.isClosed) {
+              controller.addError(error);
+            }
+          },
+          onDone: () {
+            // Flush any remaining bytes in buffer
+            if (byteBuffer.isNotEmpty && !responseComplete) {
+              try {
+                var remaining = utf8.decode(byteBuffer, allowMalformed: true);
+                // Clean up any trailing prompt
+                remaining = remaining.replaceAll(RegExp(r'\n?>\s*$'), '');
+                remaining = remaining.replaceAll(RegExp(r'\[?\s*Prompt:[^\]]*\]?\s*'), '');
+                if (remaining.trim().isNotEmpty) {
+                  controller.add(remaining);
+                }
+              } catch (_) {}
+            }
+            if (!controller.isClosed) {
+              controller.close();
+            }
+          },
+          cancelOnError: false,
+        );
+        
+        // Yield from the controller stream, allowing Flutter UI to update
+        await for (final chunk in controller.stream) {
+          yield chunk;
+          // Give Flutter's event loop a chance to process UI updates
+          await Future.delayed(Duration.zero);
         }
       } else {
         // Linux/macOS: Use standard stream transformer
@@ -267,11 +355,13 @@ class LLMService {
         }
       }
 
-      // Collect stderr but don't throw for info messages
-      final stderrOutput = await _process?.stderr.transform(utf8.decoder).join() ?? '';
-      _processStderr(stderrOutput);
-
+      // Wait for process exit and stderr draining.
       await _process?.exitCode;
+      await stderrDone.future;
+      await stderrSub.cancel();
+
+      // Process stderr but don't throw for info messages.
+      _processStderr(stderrBuffer.toString());
     } catch (e) {
       if (e.toString().contains('Process was killed')) {
         // User stopped generation, not an error
@@ -357,31 +447,41 @@ class LLMService {
     return buffer.toString().trim();
   }
 
-  /// Find llama-cli executable
+  /// Find llama-cli/llama-completion executable
   Future<String?> _findLlamaCli() async {
     // Get the executable's directory (for bundled apps)
     final execDir = path.dirname(Platform.resolvedExecutable);
     
-    // Determine executable name based on platform
-    final exeName = Platform.isWindows ? 'llama-cli.exe' : 'llama-cli';
+    // On Windows, use llama-completion which auto-exits after generation.
+    // On Linux/macOS, use llama-cli with -no-cnv flag.
+    final preferredExeNames = Platform.isWindows
+        ? const ['llama-completion.exe', 'llama-cli.exe']
+        : const ['llama-cli'];
     
     // Check common locations in order of priority
-    final possiblePaths = <String>[
-      // Bundled with app (most common for distributed apps)
-      path.join(execDir, 'lib', exeName),
-      path.join(execDir, exeName),
-      path.join(execDir, 'bin', exeName),
-      path.join(execDir, '..', 'lib', exeName),
-      path.join(execDir, '..', 'Resources', exeName), // macOS app bundle
-      
-      // Development paths
-      path.join(Directory.current.path, 'bin', exeName),
-      path.join(Directory.current.path, exeName),
-      
-      // System paths
-      '/usr/local/bin/llama-cli',
-      '/usr/bin/llama-cli',
-    ];
+    final possiblePaths = <String>[];
+    for (final exeName in preferredExeNames) {
+      possiblePaths.addAll([
+        // Bundled with app (most common for distributed apps)
+        path.join(execDir, 'lib', exeName),
+        path.join(execDir, exeName),
+        path.join(execDir, 'bin', exeName),
+        path.join(execDir, '..', 'lib', exeName),
+        path.join(execDir, '..', 'Resources', exeName), // macOS app bundle
+
+        // Development paths
+        path.join(Directory.current.path, 'bin', exeName),
+        path.join(Directory.current.path, exeName),
+      ]);
+    }
+
+    // System paths (non-Windows)
+    if (!Platform.isWindows) {
+      possiblePaths.addAll([
+        '/usr/local/bin/llama-cli',
+        '/usr/bin/llama-cli',
+      ]);
+    }
 
     // Check explicit paths first
     for (final p in possiblePaths) {
@@ -392,6 +492,8 @@ class LLMService {
             final result = await Process.run('test', ['-x', p]);
             if (result.exitCode != 0) continue;
           }
+          final base = path.basename(p).toLowerCase();
+          _usingLlamaCompletion = base.contains('llama-completion');
           return p;
         }
       } catch (_) {
@@ -402,11 +504,25 @@ class LLMService {
     // Check system PATH
     try {
       final command = Platform.isWindows ? 'where' : 'which';
-      final result = await Process.run(command, ['llama-cli']);
-      if (result.exitCode == 0) {
-        final foundPath = (result.stdout as String).trim().split('\n').first;
-        if (foundPath.isNotEmpty) {
-          return foundPath;
+      if (Platform.isWindows) {
+        for (final searchName in const ['llama-completion.exe', 'llama-cli.exe']) {
+          final result = await Process.run(command, [searchName]);
+          if (result.exitCode == 0) {
+            final foundPath = (result.stdout as String).trim().split('\n').first;
+            if (foundPath.isNotEmpty) {
+              _usingLlamaCompletion = searchName.toLowerCase().contains('llama-completion');
+              return foundPath;
+            }
+          }
+        }
+      } else {
+        final result = await Process.run(command, ['llama-cli']);
+        if (result.exitCode == 0) {
+          final foundPath = (result.stdout as String).trim().split('\n').first;
+          if (foundPath.isNotEmpty) {
+            _usingLlamaCompletion = false;
+            return foundPath;
+          }
         }
       }
     } catch (_) {}

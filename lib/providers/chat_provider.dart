@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -187,6 +188,10 @@ class ChatProvider extends ChangeNotifier {
       await for (final chunk in _llmService.generateStream(prompt)) {
         _currentResponse += chunk;
         notifyListeners();
+        // On Windows, add a small yield to ensure UI updates during streaming
+        if (Platform.isWindows) {
+          await Future.delayed(Duration.zero);
+        }
       }
 
       // Clean up the response (remove special tokens, extract reasoning)
