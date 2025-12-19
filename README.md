@@ -30,73 +30,23 @@ Download the latest release for your platform from the [Releases](https://github
 
 | Platform | Download |
 |----------|----------|
-| Windows | [offline-llm-windows-x64.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-windows-x64.zip) |
-| macOS | [offline-llm-macos.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-macos.zip) |
-| Linux (tar) | [offline-llm-linux-x64.tar.gz](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-linux-x64.tar.gz) |
-| Linux (DEB) | [offline-llm_1.0_amd64.deb](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm_1.0_amd64.deb) |
-| Linux (RPM) | [offline-llm-1.0.x86_64.rpm](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-1.0.x86_64.rpm) |
-| Android | [offline-llm-android.apk](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.0/offline-llm-android.apk) |
+| Windows | [offline-llm-windows-x64.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm-windows-x64.zip) |
+| macOS | [offline-llm-macos.zip](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm-macos.zip) |
+| Linux (tar) | [offline-llm-linux-x64.tar.gz](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm-linux-x64.tar.gz) |
+| Linux (DEB) | [offline-llm_1.3.0_amd64.deb](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm_1.3.0_amd64.deb) |
+| Linux (RPM) | [offline-llm-1.3.0.x86_64.rpm](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm-1.3.0.x86_64.rpm) |
+| Android | [offline-llm-android.apk](https://github.com/Aadhityan-A/offline-llm/releases/download/v1.3.0/offline-llm-android.apk) |
 
 ### Building from Source
 
-#### Prerequisites
+For detailed build instructions, see the [Developer Notes](docs/dev-notes.md).
 
-- [Flutter SDK](https://flutter.dev/docs/get-started/install) (3.0+)
-- [CMake](https://cmake.org/) (3.16+)
-- Platform-specific build tools:
-  - **Linux**: `sudo apt install cmake ninja-build clang libgtk-3-dev`
-  - **Windows**: Visual Studio 2022 with C++ Desktop Development
-  - **macOS**: Xcode Command Line Tools
-  - **Android**: Android Studio with NDK
-
-#### Build Steps
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Aadhityan-A/offline-llm.git
-   cd offline-llm
-   ```
-
-2. **Build llama.cpp**
-   ```bash
-   git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_build
-   cd llama_cpp_build
-   cmake -B build -DLLAMA_CURL=OFF
-   cmake --build build --config Release -j$(nproc) -- llama-cli
-   cd ..
-   
-   # Copy binaries
-   mkdir -p bin
-   cp llama_cpp_build/build/bin/llama-cli bin/
-   cp llama_cpp_build/build/bin/*.so bin/ 2>/dev/null || true
-   cp llama_cpp_build/build/bin/*.dylib bin/ 2>/dev/null || true
-   ```
-
-3. **Build for your platform**
-
-   **Linux:**
-   ```bash
-   flutter build linux --release
-   cp bin/* build/linux/x64/release/bundle/lib/
-   ```
-
-   **Windows:**
-   ```bash
-   flutter build windows --release
-   copy bin\* build\windows\x64\runner\Release\
-   ```
-
-   **macOS:**
-   ```bash
-   flutter build macos --release
-   cp bin/* build/macos/Build/Products/Release/offline_llm.app/Contents/Resources/
-   ```
-
-   **Android:**
-   ```bash
-   # Build llama.cpp for Android NDK first (see android/README.md)
-   flutter build apk --release
-   ```
+**Quick Start (Linux/macOS):**
+```bash
+git clone https://github.com/Aadhityan-A/offline-llm.git
+cd offline-llm
+./build.sh
+```
 
 ## Usage
 

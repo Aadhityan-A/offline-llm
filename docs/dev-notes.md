@@ -1,4 +1,4 @@
-# Building Offline LLM
+# Developer Notes
 
 This document provides detailed instructions for building the Offline LLM application from source on all supported platforms.
 
