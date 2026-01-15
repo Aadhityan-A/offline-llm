@@ -352,6 +352,7 @@ jobs:
           find ${PKG_DIR}/usr -type f -exec chmod 644 {} \;
           chmod 755 ${PKG_DIR}/usr/bin/offline-llm
           chmod 755 ${PKG_DIR}/usr/lib/offline-llm/offline_llm
+          chmod 755 ${PKG_DIR}/usr/lib/offline-llm/bin/llama-cli
           chmod 755 ${PKG_DIR}/DEBIAN/postinst
           chmod 755 ${PKG_DIR}/DEBIAN/postrm
 
